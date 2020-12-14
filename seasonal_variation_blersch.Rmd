@@ -1,0 +1,724 @@
+---
+title: "Vervet monkey parasites: Seasonal effects"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r load packages}
+
+library(ggplot2)
+library(lubridate)
+library(brms)
+library(zoo)
+library(bayesplot)
+library(bayestestR)
+library(RColorBrewer)
+library(dplyr)
+library(devtools)
+library(DHARMa)
+library(rethinking)
+library(ggsci)
+```
+
+```{r load data}
+#Parasite data
+
+df.parasite <- read.csv("vervet_parasite_blersch.csv")
+summary(df.parasite)
+#Environmental data monthly summaries
+
+df.environ.means <- read.csv("monthly_environ_means.csv")
+
+```
+### 1. Environmental variable plots  
+```{r Environmental variables plot}
+
+#Code used for Figure 1: Graph showing overall relationships between average monthly minimum temperature (blue line), average monthly maximum temperature (red line), total monthly precipitation (grey bars) and average monthly normalized difference vegetation index (orange line) across the study period (April 2017 – March 2018).  
+#Format and filter
+
+#Format date data
+df.environ.means$date.month <- as.Date(dmy(df.environ.means$date.month))
+df.environ.means$yearmon <- as.yearmon((df.environ.means$date.month), "%Y %m")
+
+
+#Environmental variables plot for Figure 1
+
+environ.plot <- ggplot(df.environ.means, aes(x=yearmon)) + 
+  geom_line(aes(y = t_min2), color = "darkred") + 
+  geom_line(aes(y = t_max2), color="steelblue") +
+  geom_bar(aes(y = precip/2), stat="identity", colour = "grey", alpha = 0.1) +
+scale_y_continuous(sec.axis = sec_axis(~.*2, name = "Precipitation (mm)")) +
+  xlab("Month of Study") + ylab("Temperature (°C)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"), text= element_text(size=15))
+
+#Environmental plot including NDVI: not used in manuscript
+
+#ggplot(df.environ.means, aes(x=yearmon)) + 
+  #geom_bar(aes(y = precip), stat="identity", colour = "grey", alpha = 0.3) +
+  #geom_line(aes(y = t_min2), color = "steelblue", size=1) + 
+  #geom_line(aes(y = t_max2), color="darkred", size=1) +
+  #geom_line(aes(y = mean.ndvi*100), color = "orange", size=1) +
+#scale_y_continuous(sec.axis = sec_axis(~./100, name = "NDVI")) +
+  #xlab("Month of Study") + ylab("Temperature (°C) and Precipitation (mm)") +
+  #theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+#panel.background = element_blank(), axis.line = element_line(colour = "black"), text = element_text(size = 20))
+
+```
+### 2. Formatting and scaling parasite data
+```{r Format and scale}
+
+#Convert to decimal date
+df.parasite$Collection.date <- dmy(df.parasite$Collection.date)
+df.parasite$date.dec <- decimal_date(df.parasite$Collection.date)
+
+
+#Scaling variables by 2 standard deviations
+
+#Precipitation
+df.parasite$bi_week_precip.s<- (df.parasite$precip_bi_weekly-mean(df.parasite$precip_bi_weekly))/(2*sd(df.parasite$precip_bi_weekly))
+
+#Temperature: min and max
+df.parasite$tmin.s<- (df.parasite$Tmin_chloe-mean(df.parasite$Tmin_chloe))/(2*sd(df.parasite$Tmin_chloe))
+
+df.parasite$tmax.s<- (df.parasite$Tmax_chloe-mean(df.parasite$Tmax_chloe))/(2*sd(df.parasite$Tmax_chloe))
+
+#NDVI
+df.parasite$ndvi.s<- (df.parasite$ndvi-mean(df.parasite$ndvi))/(2*sd(df.parasite$ndvi))
+
+#Date
+df.parasite$date.s <- (df.parasite$date.dec-mean(df.parasite$date.dec))/(2*sd(df.parasite$date.dec))
+
+#Check scaling
+hist(df.parasite$date.s)
+hist(df.parasite$bi_week_precip.s)
+hist(df.parasite$tmin.s)
+hist(df.parasite$ndvi.s)
+hist(df.parasite$tmax.s)
+
+```
+
+### 3. Parasite Prevalence models
+# 3.1 Trichostrongylus sp.
+```{r Prior selection and predictive checks: Trich. prevalence}
+
+#Bernoulli model for the presence/absence of Trichostrongylus across the study period
+
+#Get priors
+get_prior(trich_present ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) + offset(log(Faecal.weight)), data = df.parasite, family = "bernoulli")
+
+#Set priors
+trich.priors.b <- prior("normal(0,1)", class="b")
+
+#Priors only model to check prior suitability
+fit.trich.prior.weak <- brm(trich_present ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) + offset(log(Faecal.weight)), data = df.parasite, family = "bernoulli", chains=4, cores=4, iter=1000, prior = trich.priors.b, sample_prior = "only")
+
+plot(conditional_effects(fit.trich.prior.weak),ask=F)
+predict(fit.trich.prior.weak)
+
+```
+
+```{r Full Model fitting and posterior checks: Trich. prevalence}
+
+#Final model fitting
+fit.trich.presence <- brm(trich_present ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3), data = df.parasite, family = "bernoulli", chains=4, cores = 4, iter=2000, prior=trich.priors.b, control = list(adapt_delta=0.95, max_treedepth=10)) #Note change in random effects syntax required when using splines in brms
+
+plot(marginal_effects(fit.trich.presence), ask=F)
+
+pp_check(fit.trich.presence) #posterior predictive check
+bayes_R2(fit.trich.presence) #Bayesian R-Squared
+
+#Results: Table 3
+fit.trich.presence
+
+#Extract posteriors for denisty plots
+#post.trich.presence <- as.array(fit.trich.presence)
+
+#Posterior denisty plot
+
+mcmc_areas(fit.trich.presence, pars= c("b_Intercept", "b_bi_week_precip.s", "b_tmin.s", "b_tmax.s", "b_ndvi.s", "b_SexM"), prob=0.95, point_est = "mean") + geom_vline(xintercept = 0, linetype="dashed") + scale_y_discrete(labels=c("b_bi_week_precip.s"="Precip.", "b_tmin.s"="Temp. min." ,"b_tmax.s"="Temp. max.", "b_ndvi.s"="NDVI", "b_SexM"="Sex (male)", "b_Intercept"="Intercept")) + theme(text=element_text(size = 20))
+
+
+```
+
+```{r Posterior plots: presence/absence of Trichostrongylus sp. by date (not in manuscript)}
+
+#Create date sequence
+date.seq = seq(-0.81,0.88,length.out =  100)
+
+#Posterior predictions
+df.fit.trich.presence <- data.frame(date.s = seq(-0.81,0.88,length.out =  100), bi_week_precip.s = 0, tmin.s = 0, tmax.s = 0, ndvi.s=0, Sex="F", Faecal.weight=1.2, ID="tear", Troop="RST") 
+
+trich.fit.presence <- fitted(fit.trich.presence, newdata = df.fit.trich.presence, summary = T, re_formula = NA)
+
+trich.fit.presence <- data.frame(cbind(date.seq, trich.fit.presence))
+
+#Backscale date
+trich.fit.presence$date.bs <- trich.fit.presence$date.seq *(2*sd(df.parasite$date.dec)) + mean(df.parasite$date.dec)
+
+#Convert to date
+trich.fit.presence$date.bs <- date_decimal(trich.fit.presence$date.bs)
+trich.fit.presence$date.bs <- as_date(trich.fit.presence$date.bs)
+
+#Plot probability of presence by date
+ggplot(trich.fit.presence, aes(x=date.bs)) +
+  geom_ribbon(aes(y = Estimate, ymin= Q2.5 , ymax = Q97.5), fill ="#7570B3", alpha = 0.2) +
+  geom_line(aes(y = Estimate), color="#7570B3") + 
+  xlab("Month of Study") + ylab("Probability of Being Present") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"), text=element_text(size=15))
+
+
+```
+
+### 4. Parasite richness model
+## 4.1 Final Poisson-hurdle model
+```{r  Prior selection and predictive checks: parasite richness}
+
+#Poisson hurdle model for Parasite species richness
+
+#Get priors
+get_prior(bf(no_sp ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) ), data=df.parasite, family = "hurdle_poisson")
+
+#Set priors
+diversity.priors <- prior(normal(0,1), class = "b") + prior(normal(0,1), class="sds") + prior(normal(0,1), class="Intercept")
+
+#Priors only
+fit.diversity.priors.hurdle <- brm(no_sp ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3), data = df.parasite, family = "hurdle_poisson", chains=4, cores = 4, iter=1000, prior=diversity.priors, control = list(adapt_delta=0.95, max_treedepth=10),  sample_prior = "only")
+
+plot(conditional_effects(fit.diversity.priors.hurdle), ask=F)
+predict(fit.diversity.priors.hurdle)
+
+```
+
+```{r Full model fitting and posterior checks: parasite richness}
+
+#Hurdle model for species richness
+
+#Final model
+fit.diversity.hurdle <- brm(bf(no_sp ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + offset(log(Faecal.weight)) + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3)), data = df.parasite, family = "hurdle_poisson", chains=4, cores = 4, iter=2000, prior=diversity.priors, control = list(adapt_delta=0.95, max_treedepth=10))
+
+
+plot(marginal_effects(fit.diversity.hurdle), ask=F)
+
+pp_check(fit.diversity.hurdle) #posterior predictive check
+bayes_R2(fit.diversity.hurdle) #Bayesian R-Squared
+p_direction(fit.diversity.hurdle)
+
+#Results: Table 3
+fit.diversity.hurdle
+
+#Posterior denisty plot: figure 3
+mcmc_areas(fit.diversity.hurdle, pars= c("b_Intercept", "b_bi_week_precip.s", "b_tmin.s", "b_tmax.s", "b_ndvi.s", "b_SexM"), prob=0.95, point_est = "mean") + geom_vline(xintercept = 0, linetype="dashed") + scale_y_discrete(labels=c("b_SexM"="Sex (male)", "b_ndvi.s"="NDVI" ,"b_tmax.s"="Temp. max.", "b_tmin.s"="Temp. min.", "b_bi_week_precip.s"="Precip.", "b_Intercept"="Intercept")) + theme(text=element_text(size = 20))
+
+```
+
+```{r Posterior plots: richness by date}
+
+#Figure 2: Estimate of parasite species richness across the study period derived from the fitted Bayesian mixed-effects hurdle model with a Poisson distribution. Upper and lower 95% credible intervals (bands) were derived from the fitted model.
+
+#Posterior predictions
+df.diversity.fitted <- data.frame(date.s = seq(-0.81,0.88,by=0.01),  ID="panc", Troop = "RBM", ndvi.s=0, Sex="M", bi_week_precip.s = 0, tmin.s = 0, tmax.s=0, Faecal.weight=1.2)
+
+fit.diversity.data = fitted(fit.diversity.hurdle, newdata = df.diversity.fitted, summary=TRUE, re_formula = NA)
+
+colnames(fit.diversity.data) <- c("Mean","sd","ci.l","ci.u")
+
+fit.diversity.data <- cbind(df.diversity.fitted, fit.diversity.data)
+
+#Backscale
+fit.diversity.data$date.bs <- fit.diversity.data$date.s *(2*sd(df.parasite$date.dec)) + mean(df.parasite$date.dec)
+
+#Convert to date
+fit.diversity.data$date.bs <- date_decimal(fit.diversity.data$date.bs)
+fit.diversity.data$date.bs <- as_date(fit.diversity.data$date.bs)
+
+#Figure 2
+ggplot(fit.diversity.data, aes(x=date.bs)) + 
+  geom_ribbon(aes(y = Mean, ymin= ci.l, ymax = ci.u), fill ="#7570B3", alpha = 0.2) +
+  geom_line(aes(y = Mean), color="#7570B3") +
+  xlab("Month of Study") + ylab("Number of Parasite Genera") +
+  ylim(0, 1.4) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"), text=element_text(size=15))
+
+```
+
+## 4.2 Poisson model with overdispersion checks 
+```{r Parasite richness: Non-hurdle model and overdispersion checks}
+
+#Set priors
+diversity.priors <- prior(normal(0,1), class = "b") + prior(normal(0,1), class="sds") + prior(normal(0,1), class="Intercept")
+
+#Final model: non-hurdle
+fit.diversity.nonhurdle <- brm(bf(no_sp ~ s(date.s) + bi_week_precip.s + tmin.s + tmax.s + ndvi.s + Sex + offset(log(Faecal.weight)) + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3)), data = df.parasite, family = "poisson", chains=4, cores = 4, iter=1000, prior=diversity.priors, control = list(adapt_delta=0.95, max_treedepth=10))
+
+#Overdispersion checks
+post.pred.non <- t(predict(fit.diversity.nonhurdle, summary=FALSE))
+median.post.pred.non <- apply(post.pred.non,1,median)
+
+observations.non <- df.parasite$no_sp
+
+Dharma.non <- createDHARMa(fittedPredictedResponse = median.post.pred.non, 
+simulatedResponse = post.pred.non, observedResponse = observations.non, integerResponse = T)
+
+test<-testDispersion(Dharma.non, plot=T) #Data is overdispersed
+
+```
+### 5. Parasite intensity models
+### 5.1 Protospirura sp. (GI model)
+```{r Prior selection and predictive checks: Proto intensity}
+
+#Get priors
+my.prior.list <-get_prior(bf(Proto  ~ s(date.s, k=12, m=2, bs="tp") + s(date.s,  by= ID, bs="tp", k=15, m=1) + s(ID, bs="re", k=27) + Troop1 + offset(log(Faecal.weight)) + bi_week_precip.s + tmin.s + tmax.s + Sex + ndvi.s), data=df.parasite, family = "negbinomial")
+
+#Set priors
+priors.proto.sds =  prior("normal(0,1)", class= "b") + prior("normal(0,0.5)", class = "sds")
+
+#Priors only
+fit.proto.intensity.priors <- brm( bf(Proto ~ s(date.s,  by= ID, bs="tp", k=15, m=1) + offset(log(Faecal.weight)) + bi_week_precip.s + tmin.s + tmax.s + Sex + ndvi.s + s(date.s,  by= ID, bs="tp", k=15, m=1) + s(ID, bs="re", k=27) ), family = "negbinomial", data = df.parasite, chains = 4, cores=4, iter=2000, prior= priors.proto.sds, sample_prior = "only",  control = list(adapt_delta=0.95,  max_treedepth=12))
+
+
+plot(conditional_effects(fit.proto.intensity.priors), ask=F)
+predict(fit.proto.intensity.priors)
+
+```
+
+```{r Full model fitting and posterior checks: Proto intensity}
+
+#ID and troop random constrained sds
+fit.proto.intensity.random <- brm( bf(Proto ~ s(date.s, k=12, m=2, bs="tp") + s(date.s,  by= ID, bs="tp", k=15, m=1) + offset(log(Faecal.weight)) + bi_week_precip.s + tmin.s + tmax.s + Sex + ndvi.s +  s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) ), family = "negbinomial", data = df.parasite, chains = 4, cores=4, iter=2000, prior= priors.proto.sds, control = list(adapt_delta=0.95,  max_treedepth=12))
+
+bayes_R2(fit.proto.intensity.random)
+plot(conditional_effects(fit.proto.intensity.random), ask=FALSE) #Note: due to spline, conditional effects plot for date is NOT overall but rather represents the first individual in the dataset. Extracting and plotting the global smooth is explained in chunk 19  
+pp_check(fit.proto.intensity.random)
+
+mcmc_areas(fit.proto.intensity.random, pars= c("b_Intercept", "b_bi_week_precip.s", "b_tmin.s", "b_tmax.s", "b_ndvi.s", "b_SexM"), prob=0.95, point_est = "mean") + geom_vline(xintercept = 0, linetype="dashed") + scale_y_discrete(labels=c("b_SexM"="Sex (male)", "b_ndvi.s"="NDVI" ,"b_tmax.s"="Temp. max.", "b_tmin.s"="Temp. min.", "b_bi_week_precip.s"="Precip.", "b_Intercept"="Intercept")) + theme(text=element_text(size = 20))
+
+```
+
+```{r Posterior plots: random effects: Proto intensity}
+
+#Method required to extract individual-level data due random effects sytanx
+
+#Plot conditional effects of date by ID spline
+proto.cond <- conditional_effects(fit.proto.intensity.random, 'date.s:ID', plot=FALSE)
+
+#Extract conditional effects data
+proto.data <- as.data.frame(do.call(rbind.data.frame, proto.cond))
+
+structure(proto.data)
+
+#Format data
+proto.data$Estimate <- proto.data$estimate__
+proto.data$l.ci <- proto.data$lower__
+proto.data$u.ci <- proto.data$upper__
+
+#Backscale date
+proto.data$date.bs <- proto.data$date.s *(2*sd(df.parasite$date.dec)) + mean(df.parasite$date.dec)
+
+#Convert to date
+proto.data$date.bs <- date_decimal(proto.data$date.bs)
+proto.data$date.bs <- as_date(proto.data$date.bs)
+
+#Plot individual level splines (combined with global smooth in manuscript)
+
+ggplot(proto.data, aes(x=date.bs, y = Estimate, group=ID)) + 
+  #geom_ribbon(aes(ymin= l.ci, ymax = u.ci), alpha = 0.2) +
+    geom_line(aes(color=ID), size=0.7) +
+   xlab("Month of Study") + ylab("Faecal Egg Count") +
+  theme(legend.position= "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + #scale_color_brewer(palette="Set2") + scale_fill_brewer(palette="Set2") +
+   theme(text = element_text(size = 15))
+
+```
+
+```{r Posterior plots: fitted estimates: Proto intensity}
+
+#Due to the splines in the models, the conditional effects for date do not represent the overall smooth. This is the code for calculating the global smooth as shown in figure 4. 
+
+#This can be done in a loop if there are a large number of individuals/groups. Here it is done by ID in my study population.
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="need", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+
+need <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="shum", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+
+shum <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="tyva", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+tyva <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="brie", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+brie <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="turt", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+turt <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="lisa", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+lisa <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="dodg", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+dodg <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="mori", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+mori <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="nige", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+nige <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="schm", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+schm <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="coco", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+coco <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="saff", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+saff <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="sash", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+sash <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="lucy", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+lucy <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="dori", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+dori <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="holl", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+holl <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="flyn", Troop = "RBM", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+flyn <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="panc", Troop = "RBM", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+panc <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="laya", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+laya <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="tear", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+tear <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="arwe", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+arwe <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="cycl", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+cycl <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="pris", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+pris <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="laur", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+laur <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="bone", Troop = "RST", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+bone <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="yoda", Troop = "RST", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+yoda <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+df.pred <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="zool", Troop = "RST", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+zool <- fitted(fit.proto.intensity.random, newdata = df.pred, summary=F)
+
+
+```
+
+```{r Get the CIs and a global smooth: Proto intensity}
+
+#Using the values from the fitted code above. This can also be futher looped if necessary.
+
+#Create matrix
+global.means <- matrix(ncol=ncol(arwe), nrow=nrow(arwe) )
+
+#Get line for each ID and the mean line
+for(i in 1:4000){
+  global.means[i,]<-(arwe[i,]+bone[i,]+brie[i,]+coco[i,]+cycl[i,]+dodg[i,]+dori[i,]+flyn[i,]+holl[i,]+laur[i,]+
+                       laya[i,]+lisa[i,]+lucy[i,]+mori[i,]+need[i,]+nige[i,]+panc[i,]+pris[i,]+saff[i,]+
+                       sash[i,] + schm[i,]+shum[i,]+tear[i,]+turt[i,]+tyva[i,]+yoda[i,]+zool[i,])/27
+}
+
+#plot a couple of estimated mean lines to check
+plot(global.means[1,], type = "l")
+plot(global.means[2,], type = "l")
+
+```
+
+```{r Global smooth plot: Proto intensity}
+
+#Code for figure 4: Estimate of mean faecal egg count of ?Protospirura sp. across the study period derived from the fitted Bayesian GAMM. The blue line shows the global smooth for all individuals with upper and 95% credible intervals (bands) derived from the fitted model. Coloured lines are the estimates of individual-level faecal egg counts across the study period (individual-level smooths).
+
+#Create date sequence
+date.ss = seq(-0.822, 0.88,length=100)
+
+#Global means and CIs
+global.mean <- apply(global.means,2,mean)
+global.ci <- apply(global.means,2,HPDI, prob=0.95)
+
+#Format data
+df.final.plot <- data.frame(mean = global.mean, lci=global.ci[1,], uci=global.ci[2,], x=1:length(global.mean))
+df.final.plot <- cbind(df.final.plot, date.ss)
+
+#Backscale date
+df.final.plot$date.bs <- df.final.plot$date.ss *(2*sd(df.parasite$date.dec)) + mean(df.parasite$date.dec)
+
+#Convert to date
+df.final.plot$date.bs <- date_decimal(df.final.plot$date.bs)
+df.final.plot$date.bs <- as_date(df.final.plot$date.bs)
+
+#Global smooth plot
+ggplot(df.final.plot, aes(x=date.bs, y = mean, ymin=lci,ymax=uci)) + 
+  geom_line(size=1, colour = "#8F3931FF") +
+  geom_ribbon(fill="#8F3931FF",alpha = 0.2) +
+   xlab("Month of Study") + ylab("Faecal Egg Count") +
+  theme(legend.position= "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + scale_color_brewer(palette="Set2") + scale_fill_brewer(palette="Set2") +
+  theme(text = element_text(size = 15))
+
+#Figure 4 code: Global smooth and individual smooths combined
+
+ggplot() +
+  geom_line(aes(x=date.bs, y = Estimate, group=ID, color=ID), 
+            data = proto.data,alpha = 0.5, size=0.7) +
+  geom_ribbon(aes(x=date.bs, ymin= lci, ymax = uci),
+              data = df.final.plot,fill="dodgerblue3", alpha = 0.3) +
+   geom_line(aes(x=date.bs, y = mean), 
+            data = df.final.plot, size=1, colour = "dodgerblue3") +
+   xlab("Month of Study") + ylab("Faecal Egg Count") +
+  theme(legend.position= "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + #scale_color_brewer(palette="Set2") + scale_fill_brewer(palette="Set2") +
+  theme(text = element_text(size = 15))
+
+```
+
+##5.2 Trichostrongylus sp.
+```{r Prior selection and predictive checks: Trich intensity}
+
+#Get priors
+get_prior(bf(Trich  ~ s(date.s, k=5, m=2, bs="tp") + s(date.s,  by= ID, bs="tp", k=15, m=1) +  offset(log(Faecal.weight)) + bi_week_precip.s + tmin.s + tmax.s + Sex + ndvi.s + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) ), data=df.parasite, family = "hurdle_poisson")
+
+#Set priors
+priors.trich.strong =  prior("normal(0,1)", class= "b") + prior("normal(0,0.5)", class = "sds") + prior("normal(0,0.5)", class = "hu") + prior("normal(0,1)", class = "Intercept")
+
+#Prior only strong hu and sds
+fit.trich.intensity.priors <- brm( bf(Trich ~ s(date.s, k=5, m=2, bs="tp") + s(date.s,  by= ID, bs="tp", k=15, m=1) + offset(log(Faecal.weight)) + bi_week_precip.s + tmin.s + tmax.s + Sex + ndvi.s + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) ), family = "hurdle_poisson", data = df.parasite, chains = 4, cores=4, iter=1000, prior= priors.trich.strong, sample_prior = "only",  control = list(adapt_delta=0.95,  max_treedepth=12))
+
+plot(conditional_effects(fit.trich.intensity.priors.b), ask = FALSE)
+predict(fit.trich.intensity.priors.b)
+
+```
+
+```{r Full model fitting and posterior checks: Trich intensity}
+
+#Final model: trichostrongylus sp. intensity
+
+fit.trich.intensity <- brm( bf(Trich ~ s(date.s, k=12, m=2, bs="tp") + s(date.s,  by= ID, bs="tp", k=15, m=1) + offset(log(Faecal.weight)) + bi_week_precip.s + tmin.s + tmax.s + Sex + ndvi.s + s(ID, bs="re", k=27) + s(Troop, bs="re", k=3) ), family = "hurdle_poisson", data = df.parasite, chains = 4, cores=4, iter=2000, prior= priors.trich.strong,  control = list(adapt_delta=0.95,  max_treedepth=12))
+
+plot(conditional_effects(fit.trich.intensity), ask = FALSE)
+bayes_R2(fit.trich.intensity)
+pp_check(fit.trich.intensity)
+
+p_direction(fit.trich.intensity)
+
+#Posterior density plot
+mcmc_areas(fit.trich.intensity, pars= c("b_Intercept", "b_bi_week_precip.s", "b_tmin.s", "b_tmax.s", "b_ndvi.s", "b_SexM"), prob=0.95, point_est = "mean") + geom_vline(xintercept = 0, linetype="dashed") + scale_y_discrete(labels=c("b_SexM"="Sex (male)", "b_ndvi.s"="NDVI" ,"b_tmax.s"="Temp. max.", "b_tmin.s"="Temp. min.", "b_bi_week_precip.s"="Precip.", "b_Intercept"="Intercept")) + theme(text=element_text(size = 20))
+
+```
+
+```{r Posterior plots: random effects: Trich intensity}
+
+#Plot conditional effects
+trich.cond <- conditional_effects(fit.trich.intensity, 'date.s:ID', plot=FALSE)
+
+#Extract data
+trich.data <- as.data.frame(do.call(rbind.data.frame, trich.cond))
+
+#Format
+trich.data$Estimate <- trich.data$estimate__
+trich.data$l.ci <- trich.data$lower__
+trich.data$u.ci <- trich.data$upper__
+
+#Backscale date
+trich.data$date.bs <- trich.data$date.s *(2*sd(df.parasite$date.dec)) + mean(df.parasite$date.dec)
+
+#Convert to date
+trich.data$date.bs <- date_decimal(trich.data$date.bs)
+trich.data$date.bs <- as_date(trich.data$date.bs)
+
+#Inidividual-level plots
+ggplot(trich.data, aes(x=date.bs, y = Estimate, group=ID)) + 
+  #geom_ribbon(aes(ymin= l.ci, ymax = u.ci), alpha = 0.2) +
+    geom_line(aes(color=ID), size=0.7) +
+   xlab("Month of Study") + ylab("Faecal Egg Count") +
+  theme(legend.position= "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + #scale_color_brewer(palette="Set2") + scale_fill_brewer(palette="Set2") +
+   theme(text = element_text(size = 15))
+
+```
+
+
+```{r Posterior plots: fitted estimates: Trich intensity}
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="need", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+
+need.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="shum", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+
+shum.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="tyva", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+tyva.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="brie", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+brie.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="turt", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+turt.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="lisa", Troop = "PT", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+lisa.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="dodg", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+dodg.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="mori", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+mori.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="nige", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+nige.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="schm", Troop = "PT", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+schm.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="coco", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+coco.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="saff", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+saff.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="sash", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+sash.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="lucy", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+lucy.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="dori", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+dori.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="holl", Troop = "RBM", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+holl.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="flyn", Troop = "RBM", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+flyn.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="panc", Troop = "RBM", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+panc.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="laya", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+laya.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="tear", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+tear.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="arwe", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+arwe.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="cycl", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+cycl.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="pris", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+pris.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="laur", Troop = "RST", ndvi.s=0, Sex="F", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+laur.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="bone", Troop = "RST", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+bone.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="yoda", Troop = "RST", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+yoda.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+df.fit.i <- data.frame(date.s = seq(-0.822, 0.88,length=100),  ID="zool", Troop = "RST", ndvi.s=0, Sex="M", Faecal.weight = 1.2, bi_week_precip.s = 0, tmin.s = 0, tmax.s=0)
+zool.i <- fitted(fit.trich.intensity, newdata = df.fit.i, summary=F)
+
+#df.p1<-data.frame(value = colMeans(arwe), x= seq(1,10,length.out = 100),ID="arwe")
+#df.p2<-data.frame(value = colMeans(bone), x= seq(1,10,length.out = 100),ID="bone")
+
+```
+
+```{r Get the CIs and a global smooth: Trich intensity}
+
+global.means.i <- matrix(ncol=ncol(arwe.i), nrow=nrow(arwe.i) )
+
+for(i in 1:4000){
+  global.means.i[i,]<-(arwe.i[i,]+bone.i[i,]+brie.i[i,]+coco.i[i,]+cycl.i[i,]+dodg.i[i,]+dori.i[i,]+flyn.i[i,]+
+                       holl.i[i,]+laur.i[i,]+laya.i[i,]+lisa.i[i,]+lucy.i[i,]+mori.i[i,]+need.i[i,]+
+                       nige.i[i,]+panc.i[i,]+pris.i[i,]+saff.i[i,]+sash.i[i,] + schm.i[i,]+shum.i[i,]+
+                       tear.i[i,]+turt.i[i,]+tyva.i[i,]+yoda.i[i,]+zool.i[i,])/27
+}
+
+#plot a couple of estimated mean lines
+plot(global.means.i[1,], type = "l")
+plot(global.means.i[2,], type = "l")
+
+```
+Get the mean and CI of the global smooth
+```{r Global smooth plot: Trich intensity}
+
+#Date sequence
+date.ss = seq(-0.822, 0.88,length=100)
+
+#Global mean and CIs
+global.mean.i <- apply(global.means.i,2,mean)
+global.ci.i <- apply(global.means.i,2,HPDI, prob=0.95)
+
+#plot the mean and CI of the global smooth
+df.final.plot.intensity.trich <- data.frame(mean = global.mean.i, lci=global.ci.i[1,], uci=global.ci.i[2,], x=1:length(global.mean))
+df.final.plot.intensity.trich <- cbind(df.final.plot.intensity.trich, date.ss)
+
+#Backscale date
+df.final.plot.intensity.trich$date.bs <- df.final.plot.intensity.trich$date.ss *(2*sd(df.parasite$date.dec)) + mean(df.parasite$date.dec)
+
+#Convert to date
+df.final.plot.intensity.trich$date.bs <- date_decimal(df.final.plot.intensity.trich$date.bs)
+df.final.plot.intensity.trich$date.bs <- as_date(df.final.plot.intensity.trich$date.bs)
+
+
+#Global smooth
+ggplot(df.final.plot.intensity.trich, aes(x=date.bs, y = mean, ymin=lci,ymax=uci)) + 
+  geom_line(size=1, colour = "#8F3931FF") +
+  geom_ribbon(fill="#8F3931FF",alpha = 0.2) +
+   xlab("Month of Study") + ylab("Faecal Egg Count") +
+  theme(legend.position= "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + scale_color_brewer(palette="Set2") + scale_fill_brewer(palette="Set2") +
+  theme(text = element_text(size = 15))
+
+
+#Combined plot: figure 6
+ggplot() +
+  geom_line(aes(x=date.bs, y = Estimate, group=ID, color=ID), 
+            data = trich.data,alpha = 0.5, size=0.7) +
+  geom_ribbon(aes(x=date.bs, ymin= lci, ymax = uci),
+              data = df.final.plot.intensity.trich,fill="dodgerblue3", alpha = 0.3) +
+   geom_line(aes(x=date.bs, y = mean), 
+            data = df.final.plot.intensity.trich, size=1, colour = "dodgerblue3") +
+   xlab("Month of Study") + ylab("Faecal Egg Count") +
+  theme(legend.position= "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + #scale_color_brewer(palette="Set2") + scale_fill_brewer(palette="Set2") +
+  theme(text = element_text(size = 15))
+
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
